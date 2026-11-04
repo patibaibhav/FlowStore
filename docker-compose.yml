@@ -1,0 +1,42 @@
+# FlowStore 2.0 — single-host deployment (EC2 or local).
+#   cp .env.example .env   # set S3_BUCKET_NAME and AWS_REGION
+#   docker compose up -d --build
+# Credentials: on EC2 the instance's IAM role is used automatically (no keys in this file).
+
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+    volumes:
+      - flowstore-data:/data          # SQLite metadata + temporary Parquet staging
+    expose:
+      - "8000"                        # internal only; never published to the host
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+      start_period: 10s
+    mem_limit: ${BACKEND_MEM_LIMIT:-768m}
+    cpus: ${BACKEND_CPUS:-1.5}
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  flowstore-data:

@@ -1,0 +1,78 @@
+@import 'tailwindcss';
+@import '@xyflow/react/dist/style.css';
+
+@theme {
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, ui-monospace, monospace;
+
+  --color-bg: #07090d;
+  --color-surface: #0d1117;
+  --color-surface-2: #121821;
+  --color-surface-3: #19212d;
+  --color-line: #1f2937;
+  --color-line-strong: #2b3646;
+  --color-ink: #e6edf3;
+  --color-ink-dim: #9aa7b6;
+  --color-ink-faint: #667384;
+  --color-accent: #38bdf8;
+  --color-teal: #2dd4bf;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-bad: #f87171;
+  --color-violet: #a78bfa;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: radial-gradient(1200px 600px at 70% -10%, rgba(56, 189, 248, 0.07), transparent 60%), var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent), var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+}
+.label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-ink-faint); font-weight: 600; }
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid var(--color-line-strong); background: var(--color-surface-2); color: var(--color-ink);
+  font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.15s;
+}
+.btn:hover:not(:disabled) { background: var(--color-surface-3); border-color: #3b4a5f; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #04121c; border-color: #38bdf8; }
+.btn-primary:hover:not(:disabled) { background: linear-gradient(180deg, #5ccbfa, #19aff5); }
+.btn-danger { color: #fecaca; border-color: #7f1d1d; background: #2a1215; }
+.btn-danger:hover:not(:disabled) { background: #3a1519; border-color: #b91c1c; }
+.input {
+  width: 100%; background: var(--color-bg); border: 1px solid var(--color-line-strong); color: var(--color-ink);
+  border-radius: 8px; padding: 7px 10px; font-family: var(--font-mono); font-size: 13px;
+}
+.input:focus { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15); }
+.input:disabled { opacity: 0.5; }
+select.input { font-family: var(--font-sans); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #263142; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.skeleton { background: linear-gradient(90deg, #121821 25%, #19212d 50%, #121821 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 8px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* React Flow tweaks */
+.react-flow { background: transparent; }
+.react-flow__attribution { display: none; }
+.react-flow__edge-path { stroke-width: 2; }
+@keyframes dash { to { stroke-dashoffset: -24; } }
+.flow-edge-active { stroke-dasharray: 6 6; animation: dash linear infinite; }
+@keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 var(--ring, rgba(56,189,248,.45)); } 100% { box-shadow: 0 0 0 10px transparent; } }
+.pulse { animation: pulse-ring 1.6s infinite; }
+@media (prefers-reduced-motion: reduce) { .flow-edge-active, .pulse, .skeleton { animation: none !important; } }
+
+/* Stage nodes must receive pointer events even though they are not draggable/selectable in React Flow */
+.react-flow__node-stage { pointer-events: all !important; }
