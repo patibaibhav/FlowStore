@@ -41,6 +41,7 @@ def system_status(request: Request) -> dict[str, Any]:
                    "max_records_per_run": s.max_records_per_run, "max_pending_uploads": s.max_pending_uploads_cap,
                    "s3_max_storage_mb": s.s3_max_storage_mb},
         "telemetry_hz": s.telemetry_hz,
+        **m.capabilities(),
     }
 
 

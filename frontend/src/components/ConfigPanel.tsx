@@ -25,6 +25,7 @@ const GROUPS: { title: string; fields: Field[] }[] = [
     { key: 'queue_capacity', label: 'Queue capacity', kind: 'number', min: 10, max: 100000, unit: 'rec', help: 'Hard bound on queued records (10–100,000).', tip: 'bounded_queue' },
     { key: 'overflow_policy', label: 'Overflow policy', kind: 'select', tip: 'backpressure', options: [['block', 'Block producer (backpressure)'], ['drop_newest', 'Drop newest (reject incoming)'], ['drop_oldest', 'Drop oldest (evict queued)']], help: 'What happens when the queue is full.' },
     { key: 'processor_rate_limit', label: 'Processor capacity', kind: 'number', min: 0, max: 100000, unit: '/s', help: 'Max records/s the processor may handle. 0 = unthrottled.', tip: 'consumer_throughput' },
+    { key: 'processor_mode', label: 'Processor runs on', kind: 'select', tip: 'lambda_processor', options: [['local', 'In-process (default)'], ['lambda', 'AWS Lambda']], help: 'Where each batch is validated.' },
   ] },
   { title: 'Buffers & chunks', fields: [
     { key: 'num_partitions', label: 'Partitions', kind: 'number', min: 1, max: 32, help: 'Buffer/partition count (1–32).', tip: 'partitioning' },
@@ -41,9 +42,18 @@ const GROUPS: { title: string; fields: Field[] }[] = [
 ]
 
 export function ConfigPanel({ compact = false }: { compact?: boolean }) {
-  const { config, setConfig, isActive, estimate } = useLab()
+  const { config, setConfig, isActive, estimate, capabilities } = useLab()
   if (!config) return null
   const set = (k: keyof RunConfig, v: unknown) => setConfig({ ...config, [k]: v } as RunConfig)
+  const lam = capabilities?.processor
+  const lambdaOk = !!lam?.lambda_available
+  const modeHelp = !lambdaOk
+    ? `Lambda unavailable: ${(lam?.unavailable_reason ?? 'the server did not report Lambda support').replace(/\.$/, '')}.`
+    : config.processor_mode === 'lambda'
+      ? (lam?.lambda_emulated
+        ? 'Emulated Lambda (development only): the function runs inside the backend, so there is no real network time. Not real AWS Lambda latency.'
+        : 'Each batch makes a network round trip to AWS Lambda. This adds latency and caps processor throughput; the measured round trip is shown on the Processor node.')
+      : 'Validate batches inside the backend process (default).'
   return (
     <div>
       {isActive && <div className="mb-3 text-[12px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2">A run is active. Its configuration is frozen; edits apply to the next run.</div>}
@@ -61,9 +71,9 @@ export function ConfigPanel({ compact = false }: { compact?: boolean }) {
                     <label htmlFor={id} className="text-[12px] text-ink-dim flex items-center">{f.label}{'unit' in f && f.unit ? <span className="text-ink-faint ml-1">({f.unit})</span> : null}{'tip' in f && f.tip && <InfoTip term={f.tip} />}</label>
                     {f.kind === 'number' && <input id={id} className="input mt-1" type="number" min={f.min} max={f.max} step={f.step ?? 1} value={Number.isNaN(Number(val)) ? '' : String(val)}
                       onChange={(e) => set(f.key, e.target.value === '' ? NaN : Number(e.target.value))} aria-invalid={out} style={out ? { borderColor: '#f87171' } : undefined} />}
-                    {f.kind === 'select' && <select id={id} className="input mt-1" value={String(val)} onChange={(e) => set(f.key, e.target.value)}>{f.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>}
+                    {f.kind === 'select' && <select id={id} className="input mt-1" value={String(val)} onChange={(e) => set(f.key, e.target.value)}>{f.options.map(([v, l]) => <option key={v} value={v} disabled={f.key === 'processor_mode' && v === 'lambda' && !lambdaOk}>{l}</option>)}</select>}
                     {f.kind === 'bool' && <label className="flex items-center gap-2 mt-1 cursor-pointer"><input id={id} type="checkbox" className="accent-sky-400" checked={Boolean(val)} onChange={(e) => set(f.key, e.target.checked)} /><span className="text-[12px] text-ink-faint">{f.help}</span></label>}
-                    {f.kind !== 'bool' && <div className={`text-[11px] mt-0.5 ${out ? 'text-bad' : 'text-ink-faint'}`}>{out ? `Out of range: ${f.min}–${f.max}` : f.help}</div>}
+                    {f.kind !== 'bool' && <div className={`text-[11px] mt-0.5 ${out ? 'text-bad' : 'text-ink-faint'}`}>{out ? `Out of range: ${f.min}–${f.max}` : f.key === 'processor_mode' ? modeHelp : f.help}</div>}
                   </div>
                 )
               })}

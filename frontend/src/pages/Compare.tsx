@@ -10,6 +10,7 @@ interface M {
   rejected_validation: number; dropped: number; rejection_rate: number; peak_queue_utilization: number
   avg_throughput: number; peak_throughput: number; files: number; s3_bytes: number; avg_file_size: number
   compression_ratio: number; avg_upload_ms: number; duration_s: number; failures: number; config: RunConfig
+  processor_mode?: string; processor_batch_ms?: number; processor_rtt_ms?: number; processor_failed?: number
 }
 interface Result { runs: M[]; series: Record<string, MetricSample[]>; observations?: { kind: string; text: string }[] }
 
@@ -20,8 +21,11 @@ const ROWS: [string, (m: M) => number, (v: number) => string, boolean?][] = [
   ['Avg processing throughput', (m) => m.avg_throughput, (v) => `${fmt.rate(v)}/s`], ['Parquet files', (m) => m.files, fmt.int],
   ['Average file size', (m) => m.avg_file_size, fmt.bytes], ['Compression ratio', (m) => m.compression_ratio, (v) => `${v.toFixed(2)}×`],
   ['Avg S3 upload latency', (m) => m.avg_upload_ms, fmt.ms], ['Total bytes persisted', (m) => m.s3_bytes, fmt.bytes], ['Run duration', (m) => m.duration_s, (v) => fmt.dur(v)],
+  ['Processor time per batch', (m) => m.processor_batch_ms ?? 0, fmt.ms],
+  ['Lambda round trip (avg)', (m) => m.processor_rtt_ms ?? 0, (v) => (v ? fmt.ms(v) : '—')],
+  ['Records lost in processor', (m) => m.processor_failed ?? 0, fmt.int],
 ]
-const CFG = ['rate_per_second', 'duration_seconds', 'num_partitions', 'queue_capacity', 'overflow_policy', 'processor_rate_limit', 'invalid_ratio', 'chunk_size_records', 'chunk_max_age_seconds', 'compression', 'max_pending_uploads', 'upload_concurrency', 'injected_upload_delay_ms'] as const
+const CFG = ['rate_per_second', 'duration_seconds', 'num_partitions', 'queue_capacity', 'overflow_policy', 'processor_rate_limit', 'processor_mode', 'invalid_ratio', 'chunk_size_records', 'chunk_max_age_seconds', 'compression', 'max_pending_uploads', 'upload_concurrency', 'injected_upload_delay_ms'] as const
 
 export function Compare() {
   const [runs, setRuns] = useState<RunRow[]>([])

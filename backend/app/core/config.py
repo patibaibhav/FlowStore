@@ -22,6 +22,20 @@ class Settings(BaseSettings):
     # emulator (e.g. moto server). Leave empty on AWS.
     s3_endpoint_url: str = ""
 
+    # --- Optional Lambda processor -------------------------------------
+    # Name (or ARN) of the Lambda function that validates batches in "lambda" processor mode.
+    # Empty = Lambda mode unavailable. Never taken from the browser.
+    lambda_processor_name: str = ""
+    lambda_timeout_seconds: int = Field(default=15, ge=1, le=60)
+    lambda_max_retries: int = Field(default=3, ge=0, le=8)
+    # DEVELOPMENT/TESTS ONLY: call the handler in-process instead of AWS. Labelled "emulated" in the UI.
+    lambda_emulate_local: bool = False
+
+    # --- CloudWatch application metrics (off by default) ----------------
+    cloudwatch_enabled: bool = False
+    cloudwatch_namespace: str = "FlowStore"
+    cloudwatch_interval_seconds: float = Field(default=10.0, ge=1, le=300)
+
     # --- Application --------------------------------------------------
     data_dir: Path = Path("./data")
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -43,6 +57,22 @@ class Settings(BaseSettings):
     # --- Cost estimate assumptions (configurable, estimates only) -----
     price_s3_put_per_1000: float = 0.005
     price_s3_gb_month: float = 0.023
+
+    @property
+    def using_s3_emulator(self) -> bool:
+        return bool(self.s3_endpoint_url)
+
+    @property
+    def lambda_available(self) -> bool:
+        """Lambda mode is offered only with a configured function (real AWS) or explicit local emulation."""
+        if self.lambda_emulate_local:
+            return True
+        return bool(self.lambda_processor_name) and not self.using_s3_emulator
+
+    @property
+    def cloudwatch_active(self) -> bool:
+        """CloudWatch is never used against the S3 emulator (there is no AWS to talk to)."""
+        return self.cloudwatch_enabled and not self.using_s3_emulator
 
     @property
     def cors_origin_list(self) -> list[str]:

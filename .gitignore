@@ -12,3 +12,6 @@ data/
 frontend/test-results/
 frontend/playwright-report/
 .venv/
+
+# Lambda build output
+lambda/dist/

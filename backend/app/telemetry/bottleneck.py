@@ -33,6 +33,14 @@ def diagnose(snap: dict[str, Any]) -> dict[str, Any]:
             if cfg.get("processor_rate_limit"):
                 evidence.append(f"Processor is throttled to {cfg['processor_rate_limit']}/s by the experiment.")
                 conf = "high"
+            lam = (snap.get("processor") or {}).get("lambda")
+            if lam and lam.get("rtt_ms_avg"):
+                rtt, rpb = lam["rtt_ms_avg"], snap["processor"].get("records_per_batch_avg", 0)
+                evidence.append(
+                    f"Processor runs on AWS Lambda: measured round trip {rtt:.0f} ms per batch "
+                    f"({lam['handler_ms_avg']:.0f} ms inside the function, {lam['network_overhead_ms_avg']:.0f} ms network + invoke overhead). "
+                    + (f"Hypothesis: with ~{rpb:.0f} records per batch this round trip limits one processor thread to roughly "
+                       f"{rpb / (rtt / 1000):,.0f} records/s." if rpb else ""))
     elif pending_full and w["pending_uploads"] > 0:
         stage, conf = "Parquet Writer / Amazon S3", "low"
         evidence.append("Pending uploads are at the configured limit but the queue is not yet saturated.")

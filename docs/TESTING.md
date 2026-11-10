@@ -9,9 +9,11 @@
 | End-to-end (Playwright) | start the stack, then `cd frontend && npx playwright test` | Uses whatever S3 the backend points at (emulator locally) |
 | Local load test | `cd backend && python scripts/load_test.py 12000 8` | No (mocked S3), bounded to ≤ 60 s |
 
+Backend coverage (processor/CloudWatch, `tests/test_processor.py`): the Lambda handler returns exactly the in-process validation results (including NaN and every invalid kind), emulated Lambda mode balances the accounting invariant, retry-then-succeed / retry exhaustion / non-retryable fail-fast / function-error / bad-response handling (botocore `Stubber`), pre-warm health and rules-hash warning, refusal (HTTP 424) with no silent fallback when Lambda is unset or unreachable, `processor_failed` accounting and run failure after repeated failures, UI toggle capabilities (S3 emulator disables Lambda), and the CloudWatch publisher (moto: at most 10 metrics, no dimensions, rate limited, single final flush, errors swallowed).
+
 Backend coverage: generator reproducibility, validation reasons, queue policies (block / drop-newest / drop-oldest, abort while blocked), partition buffers (size/age), Parquet schema round-trip for every codec, S3 classification, retry-then-succeed, retry exhaustion, non-retryable fail-fast, key safety, health checks, state-machine validity, record conservation under every policy, invalid-record rejection, "failed upload is never persisted", force-cancel accounting, restart → `INTERRUPTED`, reconcile (S3 object missing from metadata / metadata missing from S3), storage cap, REST flow (start, single active run, pause really stops generation, resume, stop, objects, inspect, preview, download, delete confirmation, admin token, compare, 424 when bucket is missing), WebSocket hello.
 
-Frontend coverage: control enable/disable per run state, preset → posted config, stale telemetry ignored, live metric rendering, all seven stages rendered, range validation + backend warnings, Storage Explorer / Run History / Compare / Learning Center states, S3-not-ready banner.
+Frontend coverage: Lambda toggle disabled with a reason when unavailable, enabled and posted as `processor_mode` when available, Lambda round-trip / handler / network-overhead labels and badge, no Lambda labels in the default mode; control enable/disable per run state, preset → posted config, stale telemetry ignored, live metric rendering, all seven stages rendered, range validation + backend warnings, Storage Explorer / Run History / Compare / Learning Center states, S3-not-ready banner.
 
 ## Manual verification checklist
 1. `GET /api/storage/health` → all checks green (real S3: confirm the *write_probe* passes).
@@ -25,7 +27,7 @@ Frontend coverage: control enable/disable per run state, preset → posted confi
 
 ## Verification status (honest summary)
 * **Verified locally** (S3 emulator / mocks): backend suite, frontend suite, Playwright workflow, visual check of Live Lab / Storage Explorer / Compare at 1440 px, run pause/resume/stop through the real UI.
-* **Not verified on real AWS**: real S3 latency/throttling behaviour, IAM role credential discovery inside the container, Learner Lab permission limits, instance-size benchmarks, the opt-in real-AWS test.
+* **Not verified on real AWS**: the real Lambda function and its latency/cold starts, real CloudWatch metrics/dashboards (the Lambda client is stubbed or emulated in-process; CloudWatch uses moto), real S3 latency/throttling behaviour, IAM role credential discovery inside the container, Learner Lab permission limits, instance-size benchmarks, the opt-in real-AWS test.
 * **Docker (verified locally)**: both images build, both containers become healthy, and through Nginx on the published port: the index page loads, the storage health check passes, a WebSocket delivers `hello`/`telemetry`/`heartbeat`, and a run completes with its objects listed. This used the local S3 emulator, not real AWS.
 
 ## Known limitations

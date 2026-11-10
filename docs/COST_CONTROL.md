@@ -38,3 +38,9 @@ aws s3 rm s3://<bucket>/flowstore/runs/<run-id>/ --recursive                  # 
 aws s3 rm s3://<bucket>/flowstore/runs/ --recursive                           # everything FlowStore created
 ```
 Deleting objects does not remove run history rows; Storage Explorer's *Verify with S3* marks such objects `MISSING`.
+
+## Optional Lambda processor and CloudWatch
+* **Lambda** (only when you choose "Processor runs on: AWS Lambda"): about 40 invocations for a 10,000-record run (batches of up to 512, usually smaller at low rates). The always-free tier (1 M requests and 400,000 GB-seconds per month) covers this many times over. A cold start adds one slow call, not extra cost.
+* **CloudWatch custom metrics**: the app publishes at most 10 metrics with **no dimensions**; the free tier includes 10 custom metrics, 10 alarms and 3 dashboards. Adding a per-run or per-preset dimension would multiply the metric count (for example 9 presets x 10 metrics = 90 billable metrics), so don't. PutMetricData calls are about 1 per 10 s only while a run is active.
+* Lambda's own metrics and logs in CloudWatch are automatic; log storage is tiny (3 lines per call).
+* Turn both off when not needed: leave `LAMBDA_PROCESSOR_NAME` empty and `CLOUDWATCH_ENABLED=false`.

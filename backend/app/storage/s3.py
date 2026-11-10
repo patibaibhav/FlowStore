@@ -36,6 +36,11 @@ FATAL_CODES = {
 }
 
 
+def backoff_delay(attempt: int) -> float:
+    """Exponential backoff (0.2 s base, 8 s cap) with 0.5-1.0 jitter; shared by S3 and Lambda retries."""
+    return min(8.0, 0.2 * (2 ** (attempt - 1))) * (0.5 + random.random() / 2)
+
+
 class StorageError(Exception):
     def __init__(self, message: str, code: str = "StorageError", retryable: bool = False) -> None:
         super().__init__(message)
@@ -192,7 +197,7 @@ class S3Storage:
                     self.last_error = f"{code}: {str(e)[:200]}"
                 if not retryable or attempt > retries:
                     raise StorageError(f"{code}: {str(e)[:200]}", code, retryable) from e
-                delay = min(8.0, 0.2 * (2 ** (attempt - 1))) * (0.5 + random.random() / 2)
+                delay = backoff_delay(attempt)
                 if on_retry:
                     on_retry(attempt, delay, code)
                 if cancel is not None:

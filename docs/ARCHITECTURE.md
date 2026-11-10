@@ -12,6 +12,8 @@ Implemented in `backend/app/pipeline/`:
 | `bounded_queue.py` | bounded queue, overflow policies, blocked-time metrics |
 | `parquet_writer.py` | `PartitionBuffers`, `Chunk`, PyArrow writer, staging cleanup |
 | `engine.py` | `RunEngine`: threads, run state machine, counters, snapshots |
+| `processor_backend.py` | `LocalProcessor` (in-process, default) and `LambdaProcessor` (optional AWS Lambda call) behind one interface |
+| `lambda_handler.py` | the Lambda function source; packaged with `events.py` by `lambda/build.py` |
 | `../storage/s3.py` | boto3 adapter: health, upload+retry, listing, ranged Parquet inspection |
 
 ## 2. Concurrency model
@@ -76,3 +78,16 @@ During a run, in-flight records (queue, processing, buffered, chunks in flight) 
 | WebSocket drop | client auto-reconnects and receives a fresh `hello` |
 
 No exactly-once claim is made: after a crash, in-memory records (queue, buffers) are lost and runs are marked `INTERRUPTED`; uploaded objects are not duplicated because keys are deterministic.
+
+## 12. Processor modes (optional AWS Lambda)
+`RunConfig.processor_mode` is `local` (default) or `lambda`. Only the per-batch validation step moves: the queue, partition buffers, rejected-record storage (SQLite), counters, pause/stop and accounting stay in the backend process.
+* **Local**: `LocalProcessor` runs `events.validate()` in the processor thread (batches of up to 256).
+* **Lambda**: `LambdaProcessor` sends a batch (up to 512 records) to the function with a synchronous `Invoke`, which runs the *same* `validate()` and returns `{rows, rejected, handler_ms, cold_start, code_hash}`. Retries use the S3 backoff helper (`backoff_delay`); throttling/5xx/timeouts are retried, AccessDenied/ResourceNotFound/function crashes are not. Validation is pure, so retrying a call is safe.
+* **No silent fallback**: before a Lambda-mode run `RunManager.start` makes a real pre-warm call; failure returns HTTP 424 `PROCESSOR_NOT_READY` with the failing check. A batch that fails after retries is counted in `processor_failed` (never persisted); 3 consecutive failed batches fail the run (the Processor node turns `error`). The accounting invariant becomes `generated = abandoned + dropped + evicted + discarded + rejected + persisted + failed + processor_failed`.
+* **Availability**: the UI toggle is enabled only when the server reports `lambda_available` (`LAMBDA_PROCESSOR_NAME` set, or `LAMBDA_EMULATE_LOCAL=true`); with the S3 emulator the option is disabled and the processor is always in-process. No AWS call is made at startup.
+* **Measured timing** (both modes): per-batch time (avg/max), records per batch, µs per record. Lambda adds measured round trip, handler time, network + invoke overhead (round trip − handler), cold starts, invocations/errors/retries. `processor.latency_ms` is queue age at dequeue and does not include Lambda time; use the batch/round-trip numbers.
+* **Version check**: the handler returns a hash of its `events.py`; the pre-warm warns if it differs from the backend's (otherwise local-vs-Lambda comparisons are not like for like).
+* Stored per run (`runs.processor_failed`, `processor_batch_ms`, `processor_rtt_ms`) so Compare can show them.
+
+## 13. CloudWatch (optional)
+`telemetry/cloudwatch.py` publishes, best-effort and off by default (`CLOUDWATCH_ENABLED`, never with the S3 emulator), at most 10 custom metrics in one `PutMetricData` call per `CLOUDWATCH_INTERVAL_SECONDS` while a run is active plus a final flush: QueueDepth, GeneratedPerSec, ProcessedPerSec, PersistedPerSec, RejectedPerSec, DroppedPerSec, ProducerBlockedMs, UploadLatencyMs, UploadRetries and (Lambda mode) LambdaRttMs. **No dimensions**: every dimension combination is a separate billable custom metric. Values come from the same measured snapshot the UI uses; failures are logged and swallowed. Lambda (Invocations, Duration, Errors, Throttles) and EC2 basic metrics are emitted by AWS automatically.

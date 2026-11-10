@@ -19,7 +19,8 @@ from app.core.config import Settings
 from app.models.db import Database
 from app.pipeline import parquet_writer as pw
 from app.pipeline.bounded_queue import BoundedQueue
-from app.pipeline.events import EventGenerator, validate
+from app.pipeline.events import EventGenerator
+from app.pipeline.processor_backend import ProcessorBackend, ProcessorError, build_processor
 from app.schemas.run_config import RunConfig
 from app.storage.s3 import S3Storage, StorageError
 from app.telemetry.bottleneck import diagnose
@@ -50,10 +51,13 @@ class InvalidTransition(Exception):
 
 class RunEngine:
     def __init__(self, run_id: str, cfg: RunConfig, settings: Settings, db: Database, storage: S3Storage,
-                 eventlog: EventLog, on_snapshot: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 eventlog: EventLog, on_snapshot: Callable[[dict[str, Any]], None] | None = None,
+                 processor: ProcessorBackend | None = None, cloudwatch: Any | None = None) -> None:
         self.run_id, self.cfg, self.settings, self.db, self.storage = run_id, cfg, settings, db, storage
         self.elog = eventlog
         self.on_snapshot = on_snapshot
+        self.processor: ProcessorBackend = processor or build_processor(cfg, settings)
+        self.cloudwatch = cloudwatch
         self.state = IDLE
         self._state_lock = threading.RLock()
         self.started_at = 0.0
@@ -86,6 +90,9 @@ class RunEngine:
         self.inflight_uploads = 0
         self.builder_blocked = False
         self.consecutive_fatal = 0
+        self.consecutive_proc_failures = 0
+        self.processor_fatal = False
+        self.proc_batch_ms_max = 0.0
         self.fatal: str | None = None
         self.last_upload_at: float | None = None
         self.last_upload_error: str | None = None
@@ -270,8 +277,10 @@ class RunEngine:
     # ----- processor
     def _processor(self) -> None:
         cfg = self.cfg
+        proc = self.processor
         limit = cfg.processor_rate_limit
-        batch_size = 256 if not limit else max(1, min(256, limit // 20))
+        cap = proc.max_batch
+        batch_size = cap if not limit else max(1, min(cap, limit // 20))
         while True:
             if self.abort.is_set():
                 break
@@ -287,29 +296,36 @@ class RunEngine:
                 continue
             t0 = time.perf_counter()
             now = time.time()
-            rows, rejected = [], 0
             lat_sum = 0.0
             for ev in batch:
                 ts = ev.get("timestamp")
                 if isinstance(ts, (int, float)) and ts == ts:
                     lat_sum += now - ts
-                row, rej = validate(ev, cfg.num_partitions, now)
-                if rej is None:
-                    rows.append(row)
-                else:
-                    rejected += 1
-                    self.reject_reasons[rej.reason] += 1
-                    try:
-                        self.db.add_rejected(self.run_id, rej.event_id, now, rej.reason, rej.field,
-                                             self.settings.max_rejected_rows_per_run)
-                    except Exception:
-                        pass
+            try:
+                res = proc.process(batch, cfg.num_partitions, now, self.abort)
+            except ProcessorError as e:
+                self._processor_failed(batch, e)
+                continue
+            batch_ms = (time.perf_counter() - t0) * 1000.0
+            rows, rejected = res.rows, len(res.rejected)
+            for rej in res.rejected:
+                self.reject_reasons[rej.reason] += 1
+                try:
+                    self.db.add_rejected(self.run_id, rej.event_id, now, rej.reason, rej.field,
+                                         self.settings.max_rejected_rows_per_run)
+                except Exception:
+                    pass
             sealed = self.buffers.add_many(rows) if rows else []
             with self.c_lock:
+                self.consecutive_proc_failures = 0
                 self.c["valid"] += len(rows)
                 self.c["rejected_validation"] += rejected
                 self.c["sealed"] += sum(ch.record_count for ch in sealed)
                 self.c["chunks_created"] += len(sealed)
+                self.c["proc_batches"] += 1
+                self.c["proc_records"] += len(batch)
+                self.c["proc_batch_us"] += int(batch_ms * 1000)
+                self.proc_batch_ms_max = max(self.proc_batch_ms_max, batch_ms)
                 avg = lat_sum / len(batch)
                 self.latency_ema = avg if self.latency_ema == 0 else self.latency_ema * 0.8 + avg * 0.2
             for ch in sealed:
@@ -319,6 +335,27 @@ class RunEngine:
                 spent = time.perf_counter() - t0
                 if need > spent:
                     self.abort.wait(need - spent)
+
+    def _processor_failed(self, batch: list[dict[str, Any]], err: ProcessorError) -> None:
+        """A batch the processor could not handle (Lambda unreachable/crashed): count it, never persist it."""
+        n = len(batch)
+        cancelled = err.code == "Cancelled"
+        with self.c_lock:
+            if cancelled:
+                self.c["discarded"] += n
+                self.c["discarded_processing"] += n
+            else:
+                self.c["processor_failed"] += n
+                self.c["processor_failed_batches"] += 1
+                self.consecutive_proc_failures += 1
+                if self.consecutive_proc_failures >= 3 and not self.fatal:
+                    self.processor_fatal = True
+                    self.fatal = f"Lambda processor failed 3 consecutive batches ({err.code}); aborting run"
+                    self.abort.set(); self.gen_stop.set()
+        if not cancelled:
+            self.elog.log(self.run_id, "Processor", "ERROR",
+                          f"Processor failed for a batch of {n} records: {err}",
+                          {"code": err.code, "records": n})
 
     def _submit(self, chunk: pw.Chunk) -> None:
         """Hand a sealed chunk to the bounded upload queue (storage → upstream backpressure)."""
@@ -587,6 +624,9 @@ class RunEngine:
             "uncompressed_bytes": c.get("uncompressed_bytes", 0),
             "avg_upload_ms": (c.get("upload_ms_total", 0) / files) if files else 0.0,
             "failures": c.get("failed_chunks", 0) + c.get("unrecorded_uploads", 0),
+            "processor_failed": c.get("processor_failed", 0),
+            "processor_batch_ms": (c.get("proc_batch_us", 0) / 1000.0 / c["proc_batches"]) if c.get("proc_batches") else 0.0,
+            "processor_rtt_ms": (self.processor.stats() or {}).get("rtt_ms_avg", 0.0),
         }
 
     # ------------------------------------------------------------- telemetry
@@ -641,7 +681,11 @@ class RunEngine:
         persisted, failed, discarded = c.get("persisted", 0), c.get("failed", 0), c.get("discarded", 0)
         buffered = max(0, valid - sealed - c.get("discarded_buffer", 0))
         chunk_inflight = max(0, sealed - persisted - failed - c.get("discarded_chunk_records", 0))
-        processing_inflight = max(0, q["dequeued"] - valid - c.get("rejected_validation", 0))
+        proc_failed = c.get("processor_failed", 0)
+        processing_inflight = max(0, q["dequeued"] - valid - c.get("rejected_validation", 0)
+                                  - proc_failed - c.get("discarded_processing", 0))
+        proc_batches, proc_records = c.get("proc_batches", 0), c.get("proc_records", 0)
+        lam = self.processor.stats() or None
         gen_pending = max(0, c.get("generated", 0) - c.get("abandoned", 0) - q["dropped_newest"] - q["enqueued"])
         pending_uploads = self.upload_q.qsize() + inflight_w + inflight_u
         self._update_rates(time.monotonic(), {
@@ -664,6 +708,7 @@ class RunEngine:
                 "dropped_newest": q["dropped_newest"], "evicted_oldest": q["evicted_oldest"],
                 "rejected_validation": c.get("rejected_validation", 0), "persisted": persisted,
                 "failed": failed, "discarded": discarded, "abandoned": c.get("abandoned", 0),
+                "processor_failed": proc_failed,
                 "persisted_bytes": c.get("persisted_bytes", 0), "files": files,
             },
             "rates": dict(self._rates),
@@ -674,7 +719,15 @@ class RunEngine:
             "processor": {"processed": valid + c.get("rejected_validation", 0),
                           "rate": self._rates["processing"], "rejected": c.get("rejected_validation", 0),
                           "reject_ratio": rej_rate, "latency_ms": lat * 1000,
-                          "rate_limit": cfg.processor_rate_limit, "top_rejections": self.reject_reasons.most_common(5)},
+                          "rate_limit": cfg.processor_rate_limit, "top_rejections": self.reject_reasons.most_common(5),
+                          "mode": self.processor.mode, "emulated": self.processor.emulated,
+                          "failed": proc_failed,
+                          # measured per-batch processing time (local: validation loop; lambda: full round trip)
+                          "batch_ms_avg": (c.get("proc_batch_us", 0) / 1000.0 / proc_batches) if proc_batches else 0.0,
+                          "batch_ms_max": self.proc_batch_ms_max,
+                          "records_per_batch_avg": (proc_records / proc_batches) if proc_batches else 0.0,
+                          "us_per_record": (c.get("proc_batch_us", 0) / proc_records) if proc_records else 0.0,
+                          "lambda": lam},
             "buffers": {**bstats, "utilization": bstats["records"] / bstats["capacity"] if bstats["capacity"] else 0.0},
             "chunks": {"created": c.get("chunks_created", 0), "pending": self.upload_q.qsize(),
                        "target_size": cfg.chunk_size_records, "current_max_fill": max((p["records"] for p in bstats["partitions"]), default=0),
@@ -697,16 +750,18 @@ class RunEngine:
                 "evicted_oldest": q["evicted_oldest"], "in_queue": q["depth"],
                 "processing": processing_inflight, "rejected_validation": c.get("rejected_validation", 0),
                 "buffered": buffered, "chunks_in_flight": chunk_inflight, "persisted": persisted,
-                "failed": failed, "discarded": discarded,
+                "failed": failed, "discarded": discarded, "processor_failed": proc_failed,
             },
-            "config_summary": {"max_pending_uploads": cfg.max_pending_uploads, "processor_rate_limit": cfg.processor_rate_limit},
+            "config_summary": {"max_pending_uploads": cfg.max_pending_uploads, "processor_rate_limit": cfg.processor_rate_limit,
+                               "processor_mode": cfg.processor_mode},
         }
         acc = snap["accounting"]
         # Conservation: generated = abandoned + dropped_newest + pending + queue + evicted + processing + rejected
         #               + buffered + chunks_in_flight + persisted + failed(+discarded handled below)
         total = (acc["abandoned"] + acc["dropped_newest"] + acc["generator_pending"] + acc["evicted_oldest"]
                  + acc["in_queue"] + acc["processing"] + acc["rejected_validation"] + acc["buffered"]
-                 + acc["chunks_in_flight"] + acc["persisted"] + acc["failed"] + acc["discarded"])
+                 + acc["chunks_in_flight"] + acc["persisted"] + acc["failed"] + acc["discarded"]
+                 + acc["processor_failed"])
         # discarded records are also counted inside the location they were discarded from only at the end;
         acc["unaccounted"] = acc["generated"] - total if terminal else None
         acc["balanced"] = (acc["unaccounted"] == 0) if terminal else None
@@ -719,17 +774,18 @@ class RunEngine:
         done = state in TERMINAL_STATES
         if done:
             fail = state == FAILED
-            return {k: ("error" if fail and k == "s3" else "completed") for k in
+            bad = "processor" if self.processor_fatal else "s3"
+            return {k: ("error" if fail and k == bad else "completed") for k in
                     ("generator", "queue", "processor", "buffers", "chunk_builder", "parquet_writer", "s3")}
         paused = state in (PAUSING, PAUSED)
         n: dict[str, str] = {}
         n["generator"] = "completed" if s["generator"]["done"] else ("waiting" if paused else ("backpressured" if q["blocked_now"] else "running"))
         n["queue"] = "backpressured" if (q["blocked_now"] or q["utilization"] >= 0.9) else ("warning" if q["utilization"] >= 0.7 else ("idle" if q["depth"] == 0 else "running"))
-        n["processor"] = "waiting" if (paused or q["depth"] == 0) else "running"
+        n["processor"] = "error" if self.processor_fatal else ("waiting" if (paused or q["depth"] == 0) else "running")
         n["buffers"] = "flushing" if state == FLUSHING else ("running" if s["buffers"]["records"] else "idle")
         n["chunk_builder"] = "backpressured" if s["chunks"]["builder_blocked"] else ("flushing" if state == FLUSHING else "running" if s["chunks"]["created"] else "idle")
         n["parquet_writer"] = "uploading" if w["uploading"] else ("running" if w["writing"] else ("waiting" if w["pending_uploads"] else "idle"))
-        n["s3"] = "error" if (self.fatal or (w["failed"] and s["counters"]["persisted"] == 0 and w["failed"] >= 3)) else (
+        n["s3"] = "error" if ((self.fatal and not self.processor_fatal) or (w["failed"] and s["counters"]["persisted"] == 0 and w["failed"] >= 3)) else (
             "warning" if (w["retries"] and w["uploading"]) else ("uploading" if w["uploading"] else "idle"))
         return n
 
@@ -749,8 +805,15 @@ class RunEngine:
                     "persisted": snap["counters"]["persisted"], "rejected": snap["counters"]["rejected_validation"],
                     "dropped": snap["counters"]["dropped"], "reject_rate": snap["rates"]["rejected"],
                     "drop_rate": snap["rates"]["dropped"], "pending_uploads": snap["writer"]["pending_uploads"],
+                    "batch_ms": snap["processor"]["batch_ms_avg"],
+                    "lambda_rtt_ms": (snap["processor"]["lambda"] or {}).get("rtt_ms_avg", 0.0),
                 }, self.settings.max_metric_rows_per_run)
             except Exception:
+                pass
+        if self.cloudwatch is not None:
+            try:
+                self.cloudwatch.maybe_publish(snap)
+            except Exception:  # best effort, never affects a run
                 pass
         if self.on_snapshot:
             self.on_snapshot(snap)

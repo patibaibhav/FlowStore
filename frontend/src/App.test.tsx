@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { FakeWS, installFetch, runningSnapshot } from './test/mocks'
+import { FakeWS, installFetch, lambdaProcessor, runningSnapshot, statusWithLambda } from './test/mocks'
 
 const send = (snapshot: unknown, seq = 5, events: unknown[] = []) =>
   act(async () => { FakeWS.instances.at(-1)!.emit({ type: 'telemetry', seq, snapshot, events }) })
@@ -85,6 +85,54 @@ describe('Experiment configuration', () => {
     expect(await screen.findByText('planned records exceed cap')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /^Queue Saturation/ }))
     expect(screen.getByRole('spinbutton', { name: /Queue capacity/ })).toHaveValue(200)
+  })
+})
+
+describe('Lambda processor mode', () => {
+  it('disables the Lambda option with a reason when the server has no Lambda', async () => {
+    await boot()
+    fireEvent.click(screen.getByRole('button', { name: /Experiment/ }))
+    await screen.findAllByLabelText(/Processor runs on/)
+    const sel = document.getElementById('cfg-processor_mode') as HTMLSelectElement
+    expect(sel.querySelector('option[value="lambda"]')).toBeDisabled()
+    expect(sel).toHaveValue('local')
+    expect((await screen.findAllByText(/Lambda unavailable: LAMBDA_PROCESSOR_NAME is not set/)).length).toBeGreaterThan(0)
+  })
+
+  it('lets the user switch to Lambda and posts processor_mode on Start', async () => {
+    const calls = await boot({ '/api/system/status': statusWithLambda })
+    fireEvent.click(screen.getByRole('button', { name: /Experiment/ }))
+    await screen.findAllByLabelText(/Processor runs on/)
+    const sel = document.getElementById('cfg-processor_mode') as HTMLSelectElement
+    await waitFor(() => expect(sel.querySelector('option[value="lambda"]')).toBeEnabled())
+    fireEvent.change(sel, { target: { value: 'lambda' } })
+    expect((await screen.findAllByText(/network round trip to AWS Lambda/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: /Live Lab/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /^Start/ }))
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/api/runs')).toBe(true))
+    expect(JSON.parse(calls.find((c) => c.method === 'POST' && c.url === '/api/runs')!.body!).processor_mode).toBe('lambda')
+  })
+
+  it('labels the Lambda round trip, handler time and network overhead as Lambda latency', async () => {
+    await boot()
+    await send({ ...runningSnapshot, processor: lambdaProcessor })
+    expect((await screen.findAllByText('AWS Lambda')).length).toBeGreaterThan(0)         // badge on the node
+    fireEvent.click(screen.getByLabelText(/Processor node/))
+    const panel = await screen.findByLabelText('Processor timing')
+    expect(within(panel).getByText('Lambda round trip (avg / max)')).toBeInTheDocument()
+    expect(within(panel).getByText('Inside Lambda (handler)')).toBeInTheDocument()
+    expect(within(panel).getByText('Network + invoke overhead')).toBeInTheDocument()
+    expect(within(panel).getByText('Cold starts')).toBeInTheDocument()
+    expect(within(panel).getByText(/added latency caused by using Lambda/)).toBeInTheDocument()
+  })
+
+  it('does not show Lambda labels in the default in-process mode', async () => {
+    await boot()
+    await send({ ...runningSnapshot, processor: { ...runningSnapshot.processor, mode: 'local', emulated: false, batch_ms_avg: 1.2, lambda: null } })
+    fireEvent.click(screen.getByLabelText(/Processor node/))
+    const panel = await screen.findByLabelText('Processor timing')
+    expect(within(panel).queryByText('Lambda round trip (avg / max)')).not.toBeInTheDocument()
+    expect(within(panel).getByText('In-process')).toBeInTheDocument()
   })
 })
 

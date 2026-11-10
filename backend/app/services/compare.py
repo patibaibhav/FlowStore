@@ -24,6 +24,10 @@ def run_metrics(db: Database, run: dict[str, Any]) -> dict[str, Any]:
         "avg_file_size": (run["s3_bytes"] / files) if files else 0.0,
         "compression_ratio": (run["uncompressed_bytes"] / run["s3_bytes"]) if run["s3_bytes"] else 0.0,
         "avg_upload_ms": run["avg_upload_ms"], "duration_s": run["duration_s"] or 0.0, "failures": run["failures"],
+        "processor_mode": cfg.get("processor_mode", "local"),
+        "processor_batch_ms": run.get("processor_batch_ms", 0.0) or 0.0,
+        "processor_rtt_ms": run.get("processor_rtt_ms", 0.0) or 0.0,
+        "processor_failed": run.get("processor_failed", 0) or 0,
         "config": cfg,
     }
 
@@ -31,7 +35,7 @@ def run_metrics(db: Database, run: dict[str, Any]) -> dict[str, Any]:
 CONFIG_FIELDS = ("rate_per_second", "duration_seconds", "num_devices", "num_partitions", "queue_capacity",
                  "overflow_policy", "processor_rate_limit", "invalid_ratio", "chunk_size_records",
                  "chunk_max_age_seconds", "compression", "max_pending_uploads", "upload_concurrency",
-                 "injected_upload_delay_ms", "burst_enabled")
+                 "injected_upload_delay_ms", "burst_enabled", "processor_mode")
 
 
 def explain(a: dict[str, Any], b: dict[str, Any]) -> list[dict[str, str]]:
@@ -65,8 +69,20 @@ def explain(a: dict[str, Any], b: dict[str, Any]) -> list[dict[str, str]]:
         add("measured", f"Peak queue utilization: A={a['peak_queue_utilization']:.0%}, B={b['peak_queue_utilization']:.0%}.")
         add("hypothesis", "Higher peak utilization indicates the consumer side was slower relative to the producer; "
                           "check processor_rate_limit, upload settings and queue_capacity differences above.")
+    if a["processor_mode"] != b["processor_mode"] or a["processor_rtt_ms"] or b["processor_rtt_ms"]:
+        add("measured", f"Processor time per batch: A={a['processor_batch_ms']:.1f} ms ({a['processor_mode']}), "
+                        f"B={b['processor_batch_ms']:.1f} ms ({b['processor_mode']})."
+                        + (f" Measured Lambda round trip: A={a['processor_rtt_ms']:.1f} ms, B={b['processor_rtt_ms']:.1f} ms."
+                           if a["processor_rtt_ms"] or b["processor_rtt_ms"] else ""))
+        if "processor_mode" in changed:
+            add("hypothesis", "The processing stage runs on AWS Lambda in one run and in-process in the other. Each Lambda batch "
+                              "pays a network round trip (network + invoke overhead + time inside the function), which adds "
+                              "latency and lowers the throughput one processor thread can sustain; this run pair does not "
+                              "prove it was the only cause of any difference in throughput or queue use.")
     if a["dropped"] != b["dropped"]:
         add("measured", f"Records lost to the overflow policy: A={a['dropped']:,}, B={b['dropped']:,}.")
+    if a["processor_failed"] != b["processor_failed"]:
+        add("measured", f"Records lost because the processor failed: A={a['processor_failed']:,}, B={b['processor_failed']:,}.")
     if a["compression_ratio"] and b["compression_ratio"] and abs(a["compression_ratio"] - b["compression_ratio"]) > 0.05:
         add("measured", f"Compression ratio (in-memory columnar bytes ÷ file bytes): A={a['compression_ratio']:.2f}×, B={b['compression_ratio']:.2f}×.")
     return out
@@ -87,5 +103,6 @@ def compare(db: Database, run_ids: list[str]) -> dict[str, Any]:
         result["delta_b_minus_a"] = {k: metrics[1][k] - metrics[0][k] for k in
                                      ("generated", "accepted", "persisted", "files", "s3_bytes", "avg_file_size",
                                       "avg_upload_ms", "avg_throughput", "duration_s", "rejection_rate",
-                                      "peak_queue_utilization", "compression_ratio")}
+                                      "peak_queue_utilization", "compression_ratio",
+                                      "processor_batch_ms", "processor_rtt_ms")}
     return result

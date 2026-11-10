@@ -10,6 +10,7 @@ export const GLOSSARY: Record<string, { title: string; body: string }> = {
   compression: { title: 'Compression', body: 'Snappy is fast with a moderate ratio; ZSTD and GZIP compress harder at more CPU cost. The ratio shown is measured from real files: in-memory columnar bytes divided by file bytes.' },
   object_storage: { title: 'Object storage', body: 'Amazon S3 stores immutable objects addressed by key. There is no append, so data is written as complete chunks; every PUT is a billable request.' },
   persistence_latency: { title: 'Persistence latency', body: 'Time for a chunk to be serialized and uploaded to S3. Measured per upload with a monotonic clock.' },
+  lambda_processor: { title: 'Processor on AWS Lambda (optional)', body: 'In this mode each batch of events is sent to an AWS Lambda function, validated there with the same rules, and sent back. The round trip (network + invoke overhead + time inside the function) is added latency caused by using Lambda, and it caps what one processor thread can sustain at about batch size ÷ round-trip time. The numbers are measured per call. In-process mode has none of this overhead.' },
   retry: { title: 'Retry behavior', body: 'Throttling and 5xx errors are retried with exponential backoff and jitter; AccessDenied or NoSuchBucket are not retried because retrying cannot fix them.' },
 }
 
@@ -23,7 +24,7 @@ export const METRICS: { name: string; definition: string }[] = [
   { name: 'Processing throughput', definition: 'Records leaving the queue per second over a ~1 s sliding window.' },
   { name: 'Upload throughput', definition: 'Bytes confirmed uploaded to S3 per second over a ~1 s window.' },
   { name: 'Blocked producer time', definition: 'Cumulative seconds the generator waited because the queue was full (Block policy).' },
-  { name: 'Accounting invariant', definition: 'After a run ends: generated = abandoned + dropped + evicted + discarded + rejected + persisted + failed. While running, records in flight (queue, processing, buffers, pending chunks) are shown separately, so generated ≠ persisted during a run.' },
+  { name: 'Accounting invariant', definition: 'After a run ends: generated = abandoned + dropped + evicted + discarded + rejected + persisted + failed + processor-failed (batches the Lambda processor could not handle). While running, records in flight (queue, processing, buffers, pending chunks) are shown separately, so generated ≠ persisted during a run.' },
 ]
 
 export interface NodeInfo {
@@ -54,9 +55,9 @@ export const NODE_INFO: Record<string, NodeInfo> = {
   processor: {
     title: 'Processor', does: 'Validates schema, device id, timestamp range, numeric value range and quality flag; extracts the partition key; lightly normalizes values. Rejections are counted and sampled.',
     inputs: 'Queued events.', outputs: 'Valid rows routed to partition buffers; rejection records.',
-    config: ['processor_rate_limit', 'invalid_ratio (input)'],
-    failures: ['Throughput below producer rate', 'High validation rejection ratio'],
-    concepts: 'Consumer throughput, schema validation, data quality.',
+    config: ['processor_rate_limit', 'processor_mode (local | lambda)', 'invalid_ratio (input)'],
+    failures: ['Throughput below producer rate', 'High validation rejection ratio', 'Lambda mode: round-trip latency, cold starts, throttling or an unreachable function'],
+    concepts: 'Consumer throughput, schema validation, data quality, cost of a remote call (Lambda mode).',
   },
   buffers: {
     title: 'Buffers', does: 'Per-partition in-memory buffers (routed by CRC32 of device_id). Each tracks records, approximate bytes and age.',
@@ -131,5 +132,13 @@ export const EXPERIMENTS: Experiment[] = [
     observe: ['Object keys under flowstore/runs/{run}/partitions/{p}/chunks/', 'Footer metadata read via ranged GETs (not a full download)', 'Record count equals the persisted counter'],
     explanation: 'Parquet gives columnar layout, compression and a self-describing footer; S3 gives cheap, durable, immutable objects. Together they form the classic data-lake pattern: write immutable chunks, query later.',
     reflection: 'Why must S3 objects be written whole rather than appended to?',
+  },
+  {
+    id: 'E', title: 'In-process vs Lambda Processor', preset: 'baseline',
+    objective: 'Measure what it costs to move the processing stage to AWS Lambda (needs Lambda enabled on the server).',
+    steps: ['Run "Baseline Ingestion" with "Processor runs on" = In-process.', 'Run it again with "Processor runs on" = AWS Lambda.', 'Open the Processor node inspector during the Lambda run and read the round trip, handler time and network overhead.', 'Open Compare with both runs.'],
+    observe: ['Processor time per batch rises from about a millisecond to tens of milliseconds', 'Lambda round trip = time inside the function + network and invoke overhead', 'Cold starts are counted separately (the run pre-warms the function first)', 'Persisted counts stay the same: the rules are identical'],
+    explanation: 'Calling a remote function turns a local loop into a network call per batch. Latency rises and one processor thread can sustain fewer records per second, so heavy presets may start filling the queue. The benefit is that the stage no longer runs on the same machine. The numbers shown are measured per call, never estimated.',
+    reflection: 'When is a per-batch remote call worth its latency? How would a bigger batch size change the trade-off?',
   },
 ]

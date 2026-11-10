@@ -19,6 +19,7 @@ export interface RunConfig {
   queue_capacity: number
   overflow_policy: 'block' | 'drop_newest' | 'drop_oldest'
   processor_rate_limit: number
+  processor_mode: 'local' | 'lambda'
   num_partitions: number
   chunk_size_records: number
   chunk_max_bytes: number
@@ -43,6 +44,20 @@ export interface QueueMetrics {
   max_depth: number; blocked_now: boolean; policy: string
 }
 
+export interface LambdaStats {
+  invocations: number; errors: number; retries: number; cold_starts: number
+  rtt_ms_avg: number; rtt_ms_max: number; handler_ms_avg: number; network_overhead_ms_avg: number
+  last_error: string | null
+}
+
+export interface Capabilities {
+  processor: {
+    modes: ('local' | 'lambda')[]; lambda_available: boolean; lambda_emulated: boolean
+    lambda_function: string | null; unavailable_reason: string | null
+  }
+  cloudwatch: { enabled: boolean; namespace: string; published_calls?: number; errors?: number; last_error?: string | null }
+}
+
 export interface PartitionInfo { partition: number; records: number; bytes: number; age_s: number }
 
 export interface Snapshot {
@@ -57,7 +72,7 @@ export interface Snapshot {
   counters?: {
     generated: number; accepted: number; dropped: number; dropped_newest: number; evicted_oldest: number
     rejected_validation: number; persisted: number; failed: number; discarded: number; abandoned: number
-    persisted_bytes: number; files: number
+    persisted_bytes: number; files: number; processor_failed?: number
   }
   rates?: Record<'generation' | 'enqueue' | 'processing' | 'persist' | 'upload_bytes' | 'chunks' | 'rejected' | 'dropped', number>
   generator?: { configured_rate: number; actual_rate: number; generated: number; done: boolean; burst_enabled: boolean }
@@ -65,6 +80,9 @@ export interface Snapshot {
   processor?: {
     processed: number; rate: number; rejected: number; reject_ratio: number; latency_ms: number
     rate_limit: number; top_rejections: [string, number][]
+    mode?: 'local' | 'lambda'; emulated?: boolean; failed?: number
+    batch_ms_avg?: number; batch_ms_max?: number; records_per_batch_avg?: number; us_per_record?: number
+    lambda?: LambdaStats | null
   }
   buffers?: {
     partitions: PartitionInfo[]; records: number; bytes: number; active_partitions: number
@@ -99,6 +117,7 @@ export interface RunRow {
   dropped: number; persisted: number; unpersisted: number; peak_queue_depth: number
   avg_throughput: number; peak_throughput: number; files: number; s3_bytes: number
   uncompressed_bytes: number; avg_upload_ms: number; failures: number; note: string | null
+  processor_failed?: number; processor_batch_ms?: number; processor_rtt_ms?: number
   config: RunConfig
 }
 
@@ -122,5 +141,5 @@ export interface MetricSample {
   t: number; elapsed: number; gen_rate: number; proc_rate: number; persist_rate: number
   queue_depth: number; queue_capacity: number; buffered: number; chunks: number; chunk_rate: number
   upload_ms: number; persisted: number; rejected: number; dropped: number; reject_rate: number
-  drop_rate: number; pending_uploads: number
+  drop_rate: number; pending_uploads: number; batch_ms?: number; lambda_rtt_ms?: number
 }

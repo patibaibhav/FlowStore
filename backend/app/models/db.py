@@ -103,6 +103,12 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_rej_run ON rejected_records(run_id);
     """,
+    # v2: processor timing (local or Lambda) and batches lost by the processor
+    """
+    ALTER TABLE runs ADD COLUMN processor_failed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE runs ADD COLUMN processor_batch_ms REAL NOT NULL DEFAULT 0;
+    ALTER TABLE runs ADD COLUMN processor_rtt_ms REAL NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -181,6 +187,7 @@ class Database:
             "generated", "accepted", "rejected_validation", "dropped", "persisted", "unpersisted",
             "peak_queue_depth", "avg_throughput", "peak_throughput", "files", "s3_bytes",
             "uncompressed_bytes", "avg_upload_ms", "failures",
+            "processor_failed", "processor_batch_ms", "processor_rtt_ms",
         )
         sets = ", ".join(f"{c}=?" for c in cols)
         started = self.one("SELECT started_at FROM runs WHERE run_id=?", (run_id,))

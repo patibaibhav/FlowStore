@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -47,6 +47,10 @@ class RunConfig(BaseModel):
     processor_rate_limit: int = Field(
         default=0, ge=0, le=100_000,
         description="Max records/s the processor may handle (0 = unthrottled)",
+    )
+    processor_mode: Literal["local", "lambda"] = Field(
+        default="local",
+        description="'local' validates in the backend process; 'lambda' sends each batch to an AWS Lambda function",
     )
 
     # Buffers / chunks
@@ -102,6 +106,9 @@ def estimate(cfg: RunConfig, max_records: int, max_rate: int) -> dict[str, Any]:
         warnings.append("Very small per-partition chunks create many tiny objects.")
     if cfg.overflow_policy != OverflowPolicy.BLOCK:
         warnings.append("Non-blocking overflow policies will lose records when the queue is full.")
+    if cfg.processor_mode == "lambda":
+        warnings.append("Lambda processor: every batch makes a network round trip to AWS Lambda. This adds latency "
+                        "and caps processor throughput at roughly batch size / round-trip time.")
     return {
         "planned_records": planned,
         "estimated_valid_records": int(valid),

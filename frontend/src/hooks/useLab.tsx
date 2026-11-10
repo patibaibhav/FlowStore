@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, ApiRequestError } from '../services/api'
-import type { Estimate, LogEvent, MetricSample, Preset, RunConfig, Snapshot, StorageHealth } from '../types/api'
+import type { Capabilities, Estimate, LogEvent, MetricSample, Preset, RunConfig, Snapshot, StorageHealth } from '../types/api'
 
 export const ACTIVE = ['STARTING', 'RUNNING', 'PAUSING', 'PAUSED', 'STOPPING', 'FLUSHING']
 const MAX_POINTS = 240
@@ -19,6 +19,7 @@ export interface Lab {
   resetConfig: () => void
   estimate: Estimate | null
   health: StorageHealth | null
+  capabilities: Capabilities | null
   refreshHealth: () => Promise<void>
   busy: boolean
   error: string | null
@@ -59,6 +60,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
   const [presetId, setPresetId] = useState('baseline')
   const [estimate, setEstimate] = useState<Estimate | null>(null)
   const [health, setHealth] = useState<StorageHealth | null>(null)
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const lastSeq = useRef(0)
@@ -131,6 +133,7 @@ export function LabProvider({ children }: { children: ReactNode }) {
       setConfig(p[0].config)
     }).catch((e) => setError(e.message))
     api.get<StorageHealth>('/api/storage/health').then(setHealth).catch(() => undefined)
+    api.get<Capabilities>('/api/system/status').then(setCapabilities).catch(() => undefined)
   }, [])
 
   // debounced server-side validation + estimate
@@ -164,9 +167,9 @@ export function LabProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Lab>(() => ({
     connection, snapshot, history, events, presets, config, setConfig, presetId, selectPreset, resetConfig, estimate,
-    health, refreshHealth, busy, error, clearError: () => setError(null), start, pause, resume, stop,
+    health, capabilities, refreshHealth, busy, error, clearError: () => setError(null), start, pause, resume, stop,
     isActive: ACTIVE.includes(snapshot.state),
-  }), [connection, snapshot, history, events, presets, config, presetId, selectPreset, resetConfig, estimate, health, refreshHealth, busy, error, start, pause, resume, stop])
+  }), [connection, snapshot, history, events, presets, config, presetId, selectPreset, resetConfig, estimate, health, capabilities, refreshHealth, busy, error, start, pause, resume, stop])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

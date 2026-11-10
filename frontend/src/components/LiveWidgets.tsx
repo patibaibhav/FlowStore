@@ -72,6 +72,7 @@ export function BottleneckCard({ s }: { s: Snapshot }) {
       {flow && (
         <div className="mt-3 pt-2 border-t border-line text-[11px] mono text-ink-faint">
           in flight → queue {fmt.int(flow.in_queue as number)} · processing {fmt.int(flow.processing as number)} · buffered {fmt.int(flow.buffered as number)} · chunks {fmt.int(flow.chunks_in_flight as number)}
+          {Number(flow.processor_failed) > 0 && <span className="text-bad"> · processor failed {fmt.int(flow.processor_failed as number)}</span>}
           {flow.balanced === true && <span className="text-ok ml-2">✓ accounting balanced</span>}
           {flow.balanced === false && <span className="text-bad ml-2">✗ unaccounted: {String(flow.unaccounted)}</span>}
         </div>

@@ -3,7 +3,7 @@
 > **Status of this guide.** The application, Docker images and Nginx config were verified locally (see [TESTING.md](TESTING.md)). The steps below on real AWS Academy resources have **not** been executed by the author of this repository; Learner Lab permissions vary by course. If a step is blocked, report the exact error instead of working around it. Nothing here creates AWS resources automatically — you create them by hand.
 
 ## 0. Architecture
-`Browser → Nginx (port 80) → React static + FastAPI (internal :8000) → pipeline → PyArrow → S3`. SQLite and temporary Parquet staging live on the instance's EBS volume (Docker volume `flowstore-data`). One EC2 instance, one private S3 bucket. No Kinesis, RDS, load balancer, NAT gateway or Kubernetes.
+`Browser → Nginx (port 80) → React static + FastAPI (internal :8000) → pipeline → PyArrow → S3`. SQLite and temporary Parquet staging live on the instance's EBS volume (Docker volume `flowstore-data`). One EC2 instance, one private S3 bucket. No Kinesis, RDS, load balancer, NAT gateway or Kubernetes. Optional: the processing stage can call an AWS Lambda function (section 8b) and the app can publish metrics to CloudWatch.
 
 ## 1. Start the lab
 1. AWS Academy → your course → *Modules → Learner Lab* → **Start Lab**. Wait for the AWS indicator to turn green, then **AWS** to open the console.
@@ -65,6 +65,9 @@ It uploads one tiny Parquet file under `flowstore/_integration/`, reads it back,
 
 ## 8. HTTPS
 The lab deployment serves plain HTTP on port 80 restricted to your IP. Learner Lab typically offers no custom domain/ACM path, so HTTPS is out of scope; options if you need it: a self-signed certificate on Nginx (browser warning), or Let's Encrypt with a domain you own. Do not send secrets over the HTTP endpoint (the app itself transmits none; only the optional `X-Admin-Token`).
+
+## 8b. Optional: Lambda processor and CloudWatch
+Both are off by default. To run the processing stage on AWS Lambda for selected runs and to see app metrics in CloudWatch, follow [LAMBDA_CLOUDWATCH_SETUP.md](LAMBDA_CLOUDWATCH_SETUP.md) (click-by-click). The function is created by hand and lives in your account independently of EC2; the backend only needs `LAMBDA_PROCESSOR_NAME` in `.env` and makes no AWS call for it at startup. The instance role needs `lambda:InvokeFunction` (and `cloudwatch:PutMetricData` for metrics): see [`iam-policy.json`](iam-policy.json); LabRole normally allows both.
 
 ## 9. Stop and clean up
 * After each session: `docker compose down` (data volume survives) and **Stop** the EC2 instance. Also click **End Lab** in AWS Academy when finished.

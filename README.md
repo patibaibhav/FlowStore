@@ -18,7 +18,7 @@ Stream ingestion · bounded queues & backpressure (block / drop-newest / drop-ol
 | Backend | Python 3.12+, FastAPI, Uvicorn, Pydantic, PyArrow, boto3, SQLite (`sqlite3`, WAL, migrations) |
 | Infra | Docker Compose, Nginx (static + reverse proxy + WebSocket upgrade), EC2, S3 |
 
-Not used (by design): Kinesis, Redis, Kafka, RDS, Lambda, Kubernetes. Amazon S3 is the **only** destination for Parquet files; there is no local/EBS storage selector and no silent fallback to local files. SQLite (on the EC2/EBS disk) stores only metadata, run history and sampled telemetry.
+Not used (by design): Kinesis, Redis, Kafka, RDS, Kubernetes. **AWS Lambda is optional**: by default the processing stage runs in-process; if you deploy the small function in `lambda/` and set `LAMBDA_PROCESSOR_NAME`, the Experiment page offers "Processor runs on: AWS Lambda" per run (see *Optional: Lambda processor* below). Amazon S3 is the **only** destination for Parquet files; there is no local/EBS storage selector and no silent fallback to local files. SQLite (on the EC2/EBS disk) stores only metadata, run history and sampled telemetry. **CloudWatch** application metrics are optional and off by default.
 
 ## Repository layout
 ```
@@ -56,6 +56,12 @@ AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test uvicorn app.main:app --port 80
 cd frontend && npm run dev                                   # terminal 3
 ```
 
+With the emulator the **processor always runs in-process** and CloudWatch is off: the "AWS Lambda" option is disabled in the UI ("Lambda is not available with the S3 emulator"). To try Lambda mode without AWS add `LAMBDA_EMULATE_LOCAL=true` (the handler then runs inside the backend; it is labelled *emulated* and its timings are in-process call time, not real Lambda latency).
+
+### Optional: Lambda processor and CloudWatch
+* **Lambda processor** — `python lambda/build.py` writes `lambda/dist/flowstore-processor.zip` (the handler plus the *same* validation rules the in-process processor uses). Create a Python 3.12 function from it in the Lambda console (handler `lambda_handler.lambda_handler`, 256 MB, 10 s), put its name in `.env` as `LAMBDA_PROCESSOR_NAME`, restart the backend, then choose **Processor runs on → AWS Lambda** on the Experiment page. Each batch is sent to Lambda and back; the measured round trip (handler time + network/invoke overhead), cold starts and failures are shown on the Processor node and in Compare. Lambda mode is refused (HTTP 424) if the function is unreachable — it never falls back to in-process silently. Rebuild and re-upload when `backend/app/pipeline/events.py` changes (the app warns if the function's rules differ).
+* **CloudWatch** — set `CLOUDWATCH_ENABLED=true` to publish up to 10 custom metrics (queue depth, rates, producer blocked ms, upload latency, retries, Lambda round trip) while a run is active. Lambda's own metrics/logs and EC2's basic metrics appear in CloudWatch automatically. See [docs/AWS_LEARNER_LAB_DEPLOYMENT.md](docs/AWS_LEARNER_LAB_DEPLOYMENT.md).
+
 ### Docker Compose (what you deploy on EC2)
 ```bash
 cp .env.example .env        # set S3_BUCKET_NAME, AWS_REGION
@@ -78,6 +84,11 @@ docker compose up -d --build
 | `ADMIN_TOKEN` | *(empty)* | If set, deletes need `X-Admin-Token` |
 | `S3_ENDPOINT_URL` | *(empty)* | **Development emulator only** |
 | `PRICE_S3_PUT_PER_1000`, `PRICE_S3_GB_MONTH` | `0.005`, `0.023` | Assumptions for the *estimated* cost panel |
+| `LAMBDA_PROCESSOR_NAME` | *(empty)* | Name of the Lambda function for "Processor runs on: AWS Lambda". Empty = option disabled |
+| `LAMBDA_TIMEOUT_SECONDS`, `LAMBDA_MAX_RETRIES` | `15`, `3` | Per-call timeout and bounded retries (exponential backoff + jitter) |
+| `LAMBDA_EMULATE_LOCAL` | `false` | **Development only**: run the handler inside the backend (no AWS), labelled "emulated" |
+| `CLOUDWATCH_ENABLED` | `false` | Publish up to 10 app metrics to CloudWatch (never used with the S3 emulator) |
+| `CLOUDWATCH_NAMESPACE`, `CLOUDWATCH_INTERVAL_SECONDS` | `FlowStore`, `10` | Metric namespace and publish interval while a run is active |
 
 AWS credentials are **never** read from or sent to the browser; boto3 uses its default provider chain (IAM role on EC2).
 
@@ -86,13 +97,13 @@ AWS credentials are **never** read from or sent to the browser; boto3 uses its d
 2. **Start & watch live.** Click any pipeline node for its inspector. Pause/Resume/Stop (graceful) or Force cancel (discards unpersisted records and reports how many).
 3. **Storage Explorer** → select an object → schema, row groups, codec, sample rows (ranged S3 reads), download, delete (with confirmation).
 4. **Run History / Compare** → compare two finished runs; observations separate *measured* facts from *hypotheses*.
-5. **Learning Center** → four guided experiments, glossary, exact metric definitions.
+5. **Learning Center** → five guided experiments, glossary, exact metric definitions.
 
 See [docs/EXPERIMENT_GUIDE.md](docs/EXPERIMENT_GUIDE.md).
 
 ## Tests
 ```bash
-cd backend && python -m pytest tests            # 29 tests, no AWS needed (moto + Stubber)
+cd backend && python -m pytest tests            # 50 tests, no AWS needed (moto + Stubber)
 cd frontend && npm test                         # 12 component tests
 cd frontend && npx playwright test              # e2e; needs the stack running (see docs/TESTING.md)
 ```

@@ -4,7 +4,7 @@ import type { Preset, RunConfig } from '../types/api'
 export const baseConfig: RunConfig = {
   scenario: 'Baseline Ingestion', seed: 42, rate_per_second: 500, duration_seconds: 20, num_devices: 50, invalid_ratio: 0,
   burst_enabled: false, burst_multiplier: 4, burst_every_seconds: 10, burst_duration_seconds: 3, queue_capacity: 2000,
-  overflow_policy: 'block', processor_rate_limit: 0, num_partitions: 4, chunk_size_records: 1000, chunk_max_bytes: 8000000,
+  overflow_policy: 'block', processor_rate_limit: 0, processor_mode: 'local', num_partitions: 4, chunk_size_records: 1000, chunk_max_bytes: 8000000,
   chunk_max_age_seconds: 5, compression: 'snappy', max_pending_uploads: 4, upload_concurrency: 2, injected_upload_delay_ms: 0,
 }
 export const presets: Preset[] = [
@@ -12,6 +12,15 @@ export const presets: Preset[] = [
   { id: 'queue_saturation', name: 'Queue Saturation', description: 'd', expected: 'pinned', config: { ...baseConfig, scenario: 'Queue Saturation', queue_capacity: 200 } },
 ]
 export const health = { bucket: 'b', region: 'r', prefix: 'flowstore', ready: true, write_verified: true, checks: [{ name: 'bucket_access', ok: true, detail: 'ok' }] }
+
+export const statusLocalOnly = {
+  processor: { modes: ['local'], lambda_available: false, lambda_emulated: false, lambda_function: null, unavailable_reason: 'LAMBDA_PROCESSOR_NAME is not set on the server.' },
+  cloudwatch: { enabled: false, namespace: 'FlowStore' },
+}
+export const statusWithLambda = {
+  processor: { modes: ['local', 'lambda'], lambda_available: true, lambda_emulated: false, lambda_function: 'flowstore-processor', unavailable_reason: null },
+  cloudwatch: { enabled: true, namespace: 'FlowStore' },
+}
 
 export class FakeWS {
   static instances: FakeWS[] = []
@@ -29,7 +38,7 @@ export function installFetch(routes: Record<string, unknown> = {}) {
   const calls: { url: string; method: string; body?: string }[] = []
   const table: Record<string, unknown> = {
     '/api/presets': presets, '/api/storage/health': health, '/api/runs/estimate': { valid: true, errors: [], warnings: [], planned_records: 10000, estimated_valid_records: 10000, estimated_chunks_upper_bound: 14, estimated_put_requests: 14, note: '' },
-    '/api/runs': [], '/api/usage': { runs: 0, generated_records: 0, s3_objects: 0, parquet_bytes: 0, estimated_put_requests: 0, estimated_storage_gb: 0, estimated_monthly_storage_cost_usd: 0, estimated_put_cost_usd: 0, max_storage_mb: 512, cap_used_fraction: 0, disclaimer: 'ESTIMATES ONLY' },
+    '/api/runs': [], '/api/system/status': statusLocalOnly, '/api/usage': { runs: 0, generated_records: 0, s3_objects: 0, parquet_bytes: 0, estimated_put_requests: 0, estimated_storage_gb: 0, estimated_monthly_storage_cost_usd: 0, estimated_put_cost_usd: 0, max_storage_mb: 512, cap_used_fraction: 0, disclaimer: 'ESTIMATES ONLY' },
     ...routes,
   }
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -42,6 +51,12 @@ export function installFetch(routes: Record<string, unknown> = {}) {
     return new Response(JSON.stringify(body), { status: 200 })
   }))
   return calls
+}
+
+export const lambdaProcessor = {
+  processed: 90, rate: 470, rejected: 3, reject_ratio: 0.03, latency_ms: 4, rate_limit: 0, top_rejections: [], failed: 0,
+  mode: 'lambda', emulated: false, batch_ms_avg: 38.2, batch_ms_max: 61.5, records_per_batch_avg: 24, us_per_record: 1590,
+  lambda: { invocations: 40, errors: 1, retries: 1, cold_starts: 1, rtt_ms_avg: 38.2, rtt_ms_max: 61.5, handler_ms_avg: 2.4, network_overhead_ms_avg: 35.8, last_error: null },
 }
 
 export const runningSnapshot = {

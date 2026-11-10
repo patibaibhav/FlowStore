@@ -11,8 +11,10 @@ from app.core.config import Settings
 from app.models.db import Database
 from app.pipeline.engine import ACTIVE_STATES, InvalidTransition, RunEngine
 from app.pipeline.parquet_writer import cleanup_staging
+from app.pipeline.processor_backend import build_processor
 from app.schemas.run_config import RunConfig, estimate
 from app.storage.s3 import S3Storage
+from app.telemetry.cloudwatch import CloudWatchPublisher
 from app.telemetry.eventlog import EventLog
 
 
@@ -23,13 +25,33 @@ class ApiError(Exception):
 
 
 class RunManager:
-    def __init__(self, settings: Settings, db: Database, storage: S3Storage, elog: EventLog) -> None:
+    def __init__(self, settings: Settings, db: Database, storage: S3Storage, elog: EventLog,
+                 lambda_client: Any | None = None, cloudwatch_client: Any | None = None) -> None:
         self.settings, self.db, self.storage, self.elog = settings, db, storage, elog
         self._lock = threading.Lock()
         self.engine: RunEngine | None = None
         self._latest: dict[str, Any] | None = None
         self._snap_lock = threading.Lock()
         self.last_health: dict[str, Any] | None = None
+        self.last_processor_health: dict[str, Any] | None = None
+        self._lambda_client = lambda_client
+        self.cloudwatch = CloudWatchPublisher(settings, cloudwatch_client) if settings.cloudwatch_active else None
+
+    def capabilities(self) -> dict[str, Any]:
+        """What this server offers (drives the UI toggle). Makes no AWS calls."""
+        s = self.settings
+        reason = None
+        if not s.lambda_available:
+            reason = ("Lambda is not available with the S3 emulator (no AWS)." if s.using_s3_emulator
+                      else "LAMBDA_PROCESSOR_NAME is not set on the server.")
+        return {
+            "processor": {"modes": ["local", "lambda"] if s.lambda_available else ["local"],
+                          "lambda_available": s.lambda_available, "lambda_emulated": s.lambda_emulate_local,
+                          "lambda_function": s.lambda_processor_name or None, "unavailable_reason": reason,
+                          "last_health": self.last_processor_health},
+            "cloudwatch": self.cloudwatch.status() if self.cloudwatch else
+                          {"enabled": False, "namespace": s.cloudwatch_namespace},
+        }
 
     # --- lifecycle -----------------------------------------------------
     def recover_on_startup(self) -> list[str]:
@@ -95,10 +117,34 @@ class RunManager:
                 raise ApiError(424, "S3_NOT_READY",
                                failing[0]["detail"] if failing else "S3 is not ready",
                                {"checks": health["checks"]})
+            processor, p_health = None, None
+            if cfg.processor_mode == "lambda":
+                if not self.settings.lambda_available:
+                    caps = self.capabilities()["processor"]
+                    raise ApiError(424, "PROCESSOR_NOT_READY", caps["unavailable_reason"] or "Lambda is not available",
+                                   {"checks": [{"name": "configuration", "ok": False,
+                                                "detail": caps["unavailable_reason"], "hint": None}]})
+                processor = build_processor(cfg, self.settings, client=self._lambda_client)
+                p_health = processor.health()   # real pre-warm invoke; no silent fallback to local
+                self.last_processor_health = p_health
+                if not p_health["ready"]:
+                    failing = [c for c in p_health["checks"] if not c["ok"]]
+                    raise ApiError(424, "PROCESSOR_NOT_READY",
+                                   failing[0]["detail"] if failing else "Lambda processor is not ready",
+                                   {"checks": p_health["checks"]})
             run_id = f"run-{int(time.time() * 1000)}-{uuid.uuid4().hex[:4]}"
-            engine = RunEngine(run_id, cfg, self.settings, self.db, self.storage, self.elog, self._on_snapshot)
+            engine = RunEngine(run_id, cfg, self.settings, self.db, self.storage, self.elog, self._on_snapshot,
+                               processor=processor, cloudwatch=self.cloudwatch)
             self.engine = engine
             self._latest = None
+            if p_health:
+                pw = p_health.get("prewarm", {})
+                self.elog.log(run_id, "Processor", "INFO",
+                              f"Lambda processor ready ({'in-process emulation, not real Lambda' if p_health['emulated'] else p_health['function']}); "
+                              f"pre-warm {pw.get('rtt_ms', 0):.0f} ms" + (" (cold start)" if pw.get("cold_start") else ""),
+                              {"prewarm": pw})
+                for w in p_health["warnings"]:
+                    self.elog.log(run_id, "Processor", "WARNING", w)
             engine.start()
             return engine
 

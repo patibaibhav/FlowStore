@@ -19,6 +19,9 @@ export function nodeRows(key: Key, s: Snapshot, health: StorageHealth | null): [
     case 'queue':
       return [['Depth', `${z(s.queue?.depth)} / ${z(s.queue?.capacity)}`], ['Utilization', fmt.pct(s.queue?.utilization, 1)], ['Dropped / evicted', `${z(s.queue?.dropped_newest)} / ${z(s.queue?.evicted_oldest)}`], ['Backpressure', s.queue?.blocked_now ? `ACTIVE · ${(s.queue?.blocked_seconds ?? 0).toFixed(1)}s` : `${(s.queue?.blocked_seconds ?? 0).toFixed(1)}s total`]]
     case 'processor':
+      if (s.processor?.mode === 'lambda') {
+        return [['Processed', z(s.processor?.processed)], ['Rate', `${fmt.rate(s.processor?.rate)}/s`], ['Rejected', z(s.processor?.rejected)], ['Lambda RTT', fmt.ms(s.processor?.lambda?.rtt_ms_avg)]]
+      }
       return [['Processed', z(s.processor?.processed)], ['Rate', `${fmt.rate(s.processor?.rate)}/s`], ['Rejected', z(s.processor?.rejected)], ['Latency', fmt.ms(s.processor?.latency_ms)]]
     case 'buffers':
       return [['Partitions active', `${s.buffers?.active_partitions ?? 0} / ${s.buffers?.partitions.length ?? 0}`], ['Buffered', z(s.buffers?.records)], ['Bytes', fmt.bytes(s.buffers?.bytes)], ['Utilization', fmt.pct(s.buffers?.utilization, 1)]]
@@ -31,7 +34,7 @@ export function nodeRows(key: Key, s: Snapshot, health: StorageHealth | null): [
   }
 }
 
-interface StageData extends Record<string, unknown> { k: Key; status: NodeStatus; rows: [string, string][]; selected: boolean; onSelect: (k: Key) => void }
+interface StageData extends Record<string, unknown> { k: Key; status: NodeStatus; rows: [string, string][]; selected: boolean; onSelect: (k: Key) => void; badge?: string }
 
 const StageNode = memo(function StageNode({ data }: NodeProps<Node<StageData>>) {
   const Icon = ICONS[data.k]
@@ -47,7 +50,10 @@ const StageNode = memo(function StageNode({ data }: NodeProps<Node<StageData>>) 
         <div className="font-semibold text-[13px] flex-1 truncate">{TITLES[data.k]}</div>
         <StatusDot status={data.status} />
       </div>
-      <div className="mono text-[10px] uppercase tracking-wider mb-1.5" style={{ color }}>{data.status}</div>
+      <div className="mono text-[10px] uppercase tracking-wider mb-1.5" style={{ color }}>
+        {data.status}
+        {data.badge && <span className="ml-1.5 px-1.5 py-px rounded bg-surface-3 text-ink-dim normal-case tracking-normal" title="The processing stage runs on AWS Lambda; each batch makes a network round trip">{data.badge}</span>}
+      </div>
       <div className="space-y-0.5">
         {data.rows.slice(0, 4).map(([l, v]) => (
           <div key={l} className="flex justify-between gap-2 text-[11px]">
@@ -77,7 +83,10 @@ function Inner({ snapshot, health }: { snapshot: Snapshot; health: StorageHealth
 
   const nodes = useMemo<Node<StageData>[]>(() => ORDER.map((k, i) => ({
     id: k, type: 'stage', position: { x: i * 222, y: 40 }, draggable: false, selectable: false,
-    data: { k, status: (nodeStatus?.[k] ?? 'idle') as NodeStatus, rows: nodeRows(k, snapshot, health), selected: selected === k, onSelect: toggle },
+    data: {
+      k, status: (nodeStatus?.[k] ?? 'idle') as NodeStatus, rows: nodeRows(k, snapshot, health), selected: selected === k, onSelect: toggle,
+      badge: k === 'processor' && snapshot.processor?.mode === 'lambda' ? (snapshot.processor.emulated ? 'Lambda · emulated' : 'AWS Lambda') : undefined,
+    },
   })), [snapshot, nodeStatus, health, selected, toggle])
 
   const edges = useMemo<Edge[]>(() => {
@@ -146,11 +155,52 @@ function Inner({ snapshot, health }: { snapshot: Snapshot; health: StorageHealth
               {snapshot.processor!.top_rejections.map(([r, n]) => <div key={r} className="flex justify-between"><span className="text-ink-dim truncate pr-2">{r}</span><span className="mono">{fmt.int(n)}</span></div>)}
             </div>
           )}
+          {selected === 'processor' && snapshot.processor && <ProcessorTiming p={snapshot.processor} />}
           <Section title="Inputs → Outputs"><div className="text-ink-dim">{info.inputs}<br /><span className="text-accent">→</span> {info.outputs}</div></Section>
           <Section title="Configuration"><div className="flex flex-wrap gap-1">{info.config.map((c) => <span key={c} className="mono text-[11px] px-1.5 py-0.5 rounded bg-surface-3 text-ink-dim">{c}</span>)}</div></Section>
           <Section title="Common failure modes"><ul className="list-disc pl-4 text-ink-dim space-y-0.5">{info.failures.map((f) => <li key={f}>{f}</li>)}</ul></Section>
           <Section title="System design concepts"><div className="text-ink-dim">{info.concepts}</div></Section>
         </aside>
+      )}
+    </div>
+  )
+}
+
+function ProcessorTiming({ p }: { p: NonNullable<Snapshot['processor']> }) {
+  const lam = p.lambda
+  const mode = p.mode === 'lambda' ? (p.emulated ? 'AWS Lambda (emulated)' : 'AWS Lambda') : 'In-process'
+  const rows: [string, string][] = [
+    ['Runs on', mode],
+    ['Time per batch (avg / max)', `${fmt.ms(p.batch_ms_avg)} / ${fmt.ms(p.batch_ms_max)}`],
+    ['Records per batch', fmt.rate(p.records_per_batch_avg)],
+    ['Time per record', `${(p.us_per_record ?? 0).toFixed(1)} µs`],
+    ['Records lost in processor', fmt.int(p.failed)],
+  ]
+  return (
+    <div className="mb-3" aria-label="Processor timing">
+      <div className="label mb-1">Processing time (measured)</div>
+      <div className="card p-2.5 space-y-1">
+        {rows.map(([l, v]) => <div key={l} className="flex justify-between"><span className="text-ink-faint">{l}</span><span className="mono">{v}</span></div>)}
+      </div>
+      {p.mode === 'lambda' && lam && (
+        <>
+          <div className="label mt-3 mb-1">Lambda round trip (measured per call)</div>
+          <div className="card p-2.5 space-y-1">
+            {([
+              ['Lambda round trip (avg / max)', `${fmt.ms(lam.rtt_ms_avg)} / ${fmt.ms(lam.rtt_ms_max)}`],
+              ['Inside Lambda (handler)', fmt.ms(lam.handler_ms_avg)],
+              ['Network + invoke overhead', fmt.ms(lam.network_overhead_ms_avg)],
+              ['Cold starts', fmt.int(lam.cold_starts)],
+              ['Invocations / errors / retries', `${fmt.int(lam.invocations)} / ${fmt.int(lam.errors)} / ${fmt.int(lam.retries)}`],
+            ] as [string, string][]).map(([l, v]) => <div key={l} className="flex justify-between"><span className="text-ink-faint">{l}</span><span className="mono">{v}</span></div>)}
+            {lam.last_error && <div className="text-bad text-[11px] break-words">Last error: {lam.last_error}</div>}
+          </div>
+          <p className="text-ink-dim text-[12px] mt-2 leading-relaxed">
+            {p.emulated
+              ? 'Emulated: the function runs inside the backend process, so there is no network time. This is not real AWS Lambda latency.'
+              : 'Each batch is sent to AWS Lambda and back. This round trip is added latency caused by using Lambda; it also caps what one processor thread can sustain at about batch size ÷ round-trip time.'}
+          </p>
+        </>
       )}
     </div>
   )
