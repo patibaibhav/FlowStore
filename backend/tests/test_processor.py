@@ -17,7 +17,7 @@ from app.pipeline import lambda_handler as lh
 from app.pipeline.engine import RunEngine
 from app.pipeline.events import EventGenerator
 from app.pipeline.processor_backend import (
-    InProcessLambdaClient, LambdaProcessor, LocalProcessor, ProcessorError, build_processor,
+    InProcessLambdaClient, LambdaProcessor, LocalProcessor, ProcessorError, build_processor, encode_events,
 )
 from app.schemas.run_config import RunConfig, estimate
 from app.services.run_manager import ApiError, RunManager
@@ -62,16 +62,34 @@ def test_defaults_and_emulator_rules(tmp_path):
 
 
 # ---------------------------------------------------------------- handler == local rules
+def strict_loads(payload: str):
+    """Parse like the real Lambda Invoke API: strict JSON, no NaN/Infinity tokens."""
+    def bad(name):
+        raise ValueError(name)
+    return json.loads(payload, parse_constant=bad)
+
+
 def test_handler_matches_local_validation_including_nan(tmp_path):
     batch, now = events()
+    assert any(isinstance(e.get("sensor_value"), float) and e["sensor_value"] != e["sensor_value"] for e in batch)  # has NaN
     local = LocalProcessor().process(batch, 4, now)
-    payload = json.dumps({"events": batch, "num_partitions": 4, "now": now})      # NaN survives default json
-    out = lh.lambda_handler(json.loads(payload), None)
+    payload = json.dumps({"events": encode_events(batch), "num_partitions": 4, "now": now}, allow_nan=False)
+    out = lh.lambda_handler(strict_loads(payload), None)             # strict JSON on the wire, NaN encoded
     assert out["rows"] == local.rows
-    assert [(r["event_id"], r["reason"], r["field"]) for r in out["rejected"]] == \
-           [(r.event_id, r.reason, r.field) for r in local.rejected]
-    assert out["count"] == len(batch) and local.rejected
-    assert out["code_hash"] == lh.CODE_HASH
+    assert [(r["event_id"], r["reason"], r["field"]) for r in out["rejected"]] ==            [(r.event_id, r.reason, r.field) for r in local.rejected]
+    assert any(r.reason == "sensor_value is NaN/Infinity" for r in local.rejected)
+    assert out["count"] == len(batch) and out["code_hash"] == lh.CODE_HASH and out["protocol"] == lh.PROTOCOL
+
+
+def test_bare_nan_is_rejected_like_real_lambda_and_encoding_avoids_it(tmp_path):
+    batch, now = events()
+    naive = json.dumps({"events": batch, "num_partitions": 4, "now": now}).encode()     # emits bare NaN
+    assert b"NaN" in naive
+    with pytest.raises(ClientError) as ei:
+        InProcessLambdaClient().invoke(FunctionName="x", Payload=naive)
+    assert ei.value.response["Error"]["Code"] == "InvalidRequestContentException"
+    safe = LambdaProcessor(mkset(tmp_path, lambda_emulate_local=True)).process(batch, 4, now)
+    assert safe.rejected and len(safe.rows) + len(safe.rejected) == len(batch)
 
 
 def test_emulated_lambda_processor_equals_local_and_reports_timing(tmp_path):
@@ -146,12 +164,23 @@ def test_health_prewarm_and_code_hash_warning(tmp_path):
     s = mkset(tmp_path, lambda_processor_name="fn")
     client, stub = lambda_stub(s)
     stub.add_response("invoke", {"StatusCode": 200, "Payload": body(
-        {"rows": [], "rejected": [], "count": 0, "handler_ms": 1.0, "cold_start": True, "code_hash": "deadbeef"})})
+        {"rows": [], "rejected": [], "count": 0, "handler_ms": 1.0, "cold_start": True, "code_hash": "deadbeef",
+         "protocol": lh.PROTOCOL})})
     with stub:
         h = LambdaProcessor(s, client=client).health()
     assert h["ready"] and h["prewarm"]["cold_start"] and not h["code_hash_match"] and h["warnings"]
     h2 = LambdaProcessor(mkset(tmp_path, lambda_emulate_local=True)).health()
     assert h2["ready"] and h2["code_hash_match"] and h2["emulated"] and not h2["warnings"]
+
+
+def test_health_refuses_an_older_function_protocol(tmp_path):
+    s = mkset(tmp_path, lambda_processor_name="fn")
+    client, stub = lambda_stub(s)
+    stub.add_response("invoke", {"StatusCode": 200, "Payload": body(
+        {"rows": [], "rejected": [], "count": 0, "handler_ms": 1.0, "cold_start": False, "code_hash": lh.CODE_HASH})})
+    with stub:
+        h = LambdaProcessor(s, client=client).health()
+    assert not h["ready"] and h["checks"][-1]["name"] == "function_version" and "build.py" in h["checks"][-1]["hint"]
 
 
 def test_health_reports_unset_name_and_missing_function(tmp_path):

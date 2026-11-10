@@ -10,11 +10,11 @@
 ## B. Create the Lambda function
 1. AWS Academy → your course → **Modules → Learner Lab** → **Start Lab**. Wait for the AWS dot to turn **green**, then click **AWS** (opens the console). Check the region (top right) is the same as your EC2 instance and bucket (usually **us-east-1**).
 2. In the search bar type **Lambda** and open it → **Create function**.
-3. Choose **Author from scratch**. Function name: `flowstore-processor`. Runtime: **Python 3.12**. Architecture: **x86_64**.
-4. Expand **Change default execution role** → **Use an existing role** → pick **LabRole**. (Learner Lab does not let you create roles.)
+3. Choose **Author from scratch**. Function name: `flowstore-processor`. Runtime: **Python 3.12**. Architecture: leave the **ARM64 architecture** toggle **off** (= x86_64). In the newer console it sits under **Additional settings → General**; older consoles show an Architecture radio button under Runtime. Leave **Durable execution** and **EC2 capacity provider** off.
+4. Still under **Additional settings → General**, turn **Custom execution role** **on** → **Use an existing role** → pick **LabRole**. (Learner Lab does not let you create roles, so don't leave the default "create a new role".) In older consoles this is **Change default execution role**.
 5. Click **Create function**.
-6. **Code** tab → **Upload from** → **.zip file** → **Upload** → choose `flowstore-processor.zip` → **Save**.
-7. Still on the **Code** tab, scroll to **Runtime settings** → **Edit** → **Handler** = `lambda_handler.lambda_handler` → **Save**.
+6. **Code** tab → click **Update** (top right of the code editor; older consoles call it **Upload from**) → **Update from a .zip file** → **Upload** → choose `flowstore-processor.zip` → **Save**. The editor should now show `lambda_handler.py` and `events.py`. Do not click **Deploy** on the sample code.
+7. Still on the **Code** tab, scroll below the editor to **Runtime settings** → **Edit** → **Handler** = `lambda_handler.lambda_handler` (the default is `lambda_function.lambda_handler`, which no longer exists) → **Save**.
 8. **Configuration** tab → **General configuration** → **Edit** → **Memory** `256 MB`, **Timeout** `0 min 10 sec` → **Save**.
 9. **Test** tab → **Create new event** → name `ping` → Event JSON:
    ```json
@@ -67,6 +67,12 @@ Metrics from the app appear only after a run with `CLOUDWATCH_ENABLED=true` (all
 1. Run **Baseline Ingestion** with *In-process*, then again with *AWS Lambda* (duration 60 s for nice graphs).
 2. Open **Compare** with both runs: *Processor time per batch* is a few ms in-process and tens of ms on Lambda; *Lambda round trip (avg)* is filled for the Lambda run; persisted counts match the generated minus rejected for each run.
 3. Console → CloudWatch → the dashboard shows both runs; Lambda **Invocations** equals the *Invocations* shown on the Processor node (plus the one pre-warm call).
+
+## Troubleshooting
+* **Run refused: "Lambda function protocol ... != backend protocol"** — the deployed function is older than the backend. Run `python lambda/build.py`, then **Code tab → Update → Update from a .zip file** and upload `lambda/dist/flowstore-processor.zip` again.
+* **Run fails with `InvalidRequestContentException`** — the request body was not strict JSON. Fixed in the current code (NaN/Infinity are sent encoded); make sure both the backend (`git pull`, `docker compose up -d --build`) and the function (re-uploaded zip) are current.
+* **`Unable to import module 'lambda_function'`** — the Handler setting is still the sample default; set it to `lambda_handler.lambda_handler` (step B7).
+* **AccessDeniedException** — the instance role may not be allowed `lambda:InvokeFunction` in your course; report it, LabRole cannot be edited in Learner Lab.
 
 ## F. Clean up and cost
 * Lambda, CloudWatch and S3 requests are tiny at this scale (a 10,000-record run is about 40 Lambda calls). Keep to the 10 custom metrics: **never add per-run or per-preset dimensions** (each combination is billed as a separate metric).

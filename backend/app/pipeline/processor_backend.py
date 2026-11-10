@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -16,10 +17,11 @@ from typing import Any, Protocol
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from app.core.config import Settings
 from app.pipeline.events import Rejection, validate
-from app.pipeline.lambda_handler import CODE_HASH, lambda_handler
+from app.pipeline.lambda_handler import CODE_HASH, PROTOCOL, lambda_handler
 from app.schemas.run_config import RunConfig
 from app.storage.s3 import backoff_delay, classify
 
@@ -76,12 +78,41 @@ class LocalProcessor:
         return {}
 
 
+def encode_events(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Make events strict-JSON safe: real Lambda rejects the bare NaN/Infinity tokens Python's json emits."""
+    out: list[dict[str, Any]] = []
+    for ev in batch:
+        bad = [k for k, v in ev.items() if isinstance(v, float) and not math.isfinite(v)]
+        if not bad:
+            out.append(ev)
+            continue
+        e = dict(ev)
+        for k in bad:
+            e[k] = {"__float__": repr(ev[k])}   # 'nan' | 'inf' | '-inf'
+        out.append(e)
+    return out
+
+
+def _reject_constant(name: str) -> None:
+    raise ValueError(f"invalid JSON constant {name}")
+
+
 class InProcessLambdaClient:
-    """DEV/TEST ONLY stand-in for boto3's Lambda client: runs the handler in this process (no network)."""
+    """DEV/TEST ONLY stand-in for boto3's Lambda client: runs the handler in this process (no network).
+
+    Parses the request body as STRICT JSON like the real Invoke API (no NaN/Infinity), so encoding
+    mistakes show up here too.
+    """
 
     def invoke(self, FunctionName: str, InvocationType: str = "RequestResponse", Payload: bytes = b"") -> dict[str, Any]:
-        out = lambda_handler(json.loads(Payload), None)
-        return {"StatusCode": 200, "Payload": io.BytesIO(json.dumps(out).encode())}
+        try:
+            event = json.loads(Payload, parse_constant=_reject_constant)
+        except ValueError as e:
+            raise ClientError({"Error": {"Code": "InvalidRequestContentException",
+                                         "Message": f"Could not parse request body into json: {e}"},
+                               "ResponseMetadata": {"HTTPStatusCode": 400}}, "Invoke") from e
+        out = lambda_handler(event, None)
+        return {"StatusCode": 200, "Payload": io.BytesIO(json.dumps(out, allow_nan=False).encode())}
 
 
 @dataclass
@@ -164,6 +195,12 @@ class LambdaProcessor:
                                  + (" (cold start)" if data.get("cold_start") else ""), "hint": None})
         res["prewarm"] = {"rtt_ms": rtt, "handler_ms": data.get("handler_ms", 0.0),
                           "cold_start": bool(data.get("cold_start"))}
+        if data.get("protocol") != PROTOCOL:
+            checks.append({"name": "function_version", "ok": False,
+                           "detail": f"Lambda function protocol {data.get('protocol')} != backend protocol {PROTOCOL}",
+                           "hint": "The deployed function is older than this backend. Run `python lambda/build.py` and "
+                                   "upload lambda/dist/flowstore-processor.zip again (Code tab → Update → .zip file)."})
+            return res
         res["code_hash"], res["backend_code_hash"] = data.get("code_hash"), CODE_HASH
         res["code_hash_match"] = data.get("code_hash") == CODE_HASH
         if not res["code_hash_match"]:
@@ -179,7 +216,11 @@ class LambdaProcessor:
     # --- one batch ---------------------------------------------------------
     def process(self, batch: list[dict[str, Any]], num_partitions: int, now: float,
                 cancel: threading.Event | None = None) -> BatchResult:
-        payload = json.dumps({"events": batch, "num_partitions": num_partitions, "now": now}).encode()
+        try:
+            payload = json.dumps({"events": encode_events(batch), "num_partitions": num_partitions, "now": now},
+                                 allow_nan=False).encode()
+        except (TypeError, ValueError) as e:
+            raise ProcessorError(f"batch cannot be encoded as JSON: {e}", "BadRequest", False) from e
         st = self._stats
         retries = self.settings.lambda_max_retries
         attempt = 0

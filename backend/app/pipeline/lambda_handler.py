@@ -29,7 +29,16 @@ def _code_hash() -> str:
 
 
 CODE_HASH = _code_hash()
+# Wire-format version shared with the backend. 2: non-finite floats (NaN/Infinity) are sent as
+# {"__float__": "nan"} because the Lambda Invoke API only accepts strict JSON.
+PROTOCOL = 2
 _cold = True
+
+
+def _decode(ev: dict[str, Any]) -> dict[str, Any]:
+    if not any(isinstance(v, dict) and "__float__" in v for v in ev.values()):
+        return ev
+    return {k: (float(v["__float__"]) if isinstance(v, dict) and "__float__" in v else v) for k, v in ev.items()}
 
 
 def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -37,12 +46,12 @@ def lambda_handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]
     t0 = time.perf_counter()
     cold, _cold = _cold, False
     out: dict[str, Any] = {"rows": [], "rejected": [], "cold_start": cold, "code_hash": CODE_HASH,
-                           "python": sys.version.split()[0]}
+                           "protocol": PROTOCOL, "python": sys.version.split()[0]}
     batch = event.get("events") or []
     num_partitions = int(event.get("num_partitions", 4))
     now = event.get("now")
     for ev in batch:
-        row, rej = validate(ev, num_partitions, now)
+        row, rej = validate(_decode(ev), num_partitions, now)
         if rej is None:
             out["rows"].append(row)
         else:
